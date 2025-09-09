@@ -1,0 +1,149 @@
+// ===== Blynk Credentials =====
+#define BLYNK_TEMPLATE_ID "TMPL3-DwUmhSr"
+#define BLYNK_TEMPLATE_NAME "transformer monitor"
+#define BLYNK_AUTH_TOKEN "Nj-4vLNQ72ZVBsasyqKG4Kd37HiQnDHe" 
+// ===== Libraries =====
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+
+// ===== OLED Display Config =====
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET     -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// ===== Wi-Fi Credentials =====
+char ssid[] = "Ebin"; 
+char pass[] = ""; 
+
+// ===== Google Script Webhook URL =====
+const char* googleScriptUrl = "https://script.google.com/macros/s/AKfycbzsOrUk96OXHpVatvRsMzp2aXVDfRqbz8bumu4LOOMtUoGULukxq0wnjXGLQjHvLevA/exec"; // Replace with your actual URL 
+
+// ===== Hardware Pins =====
+const int tempPin = 34;
+const int floatSensorPin = 26;
+const int buzzerPin = 25;
+
+// ===== Blynk Virtual Pins =====
+#define VPIN_TEMP V0
+#define VPIN_OIL  V1
+
+BlynkTimer timer;
+bool alarmActive = false;
+
+// ===== Setup =====
+void setup() {
+  Serial.begin(115200);
+  pinMode(floatSensorPin, INPUT);
+  pinMode(buzzerPin, OUTPUT);
+  digitalWrite(buzzerPin, LOW);
+
+  // OLED Setup
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("OLED not found"));
+    while (true); // halt
+  }
+  display.clearDisplay();
+  display.display();
+
+  // Connect to Blynk
+  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
+
+  // Sensor Reading every 2 seconds
+  timer.setInterval(2000L, readSensors);
+
+  // Log to Google Sheets every 1 hour (3600000 ms)
+  timer.setInterval(3600000L, sendToGoogleSheetHourly);
+}
+
+// ===== Read Sensors and Display =====
+void readSensors() {
+  int analogValue = analogRead(tempPin);
+  float voltage = analogValue * (3.3 / 4095.0);
+  float temperature = voltage * 100.0;
+
+  int oilStatus = digitalRead(floatSensorPin); // 1 = OK, 0 = LOW
+
+  // Send to Blynk
+  Blynk.virtualWrite(VPIN_TEMP, temperature);
+  Blynk.virtualWrite(VPIN_OIL, oilStatus);
+
+  // Serial Monitor
+  Serial.print("Temperature: ");
+  Serial.print(temperature);
+  Serial.print(" °C | Oil Level: ");
+  Serial.println(oilStatus ? "OK" : "LOW");
+
+  // OLED Display
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 0);
+  display.print("Temp: ");
+  display.print(temperature);
+  display.println(" C");
+
+  display.print("Oil: ");
+  display.println(oilStatus ? "OK" : "LOW");
+
+  // Bar Graphs
+  int tempBar = map((int)temperature, 0, 100, 0, 100);
+  int oilBar = oilStatus ? 100 : 0;
+
+  display.drawRect(0, 25, 100, 10, WHITE);
+  display.fillRect(0, 25, tempBar, 10, WHITE);
+
+  display.drawRect(0, 45, 100, 10, WHITE);
+  display.fillRect(0, 45, oilBar, 10, WHITE);
+
+  display.display();
+
+  // Buzzer Condition
+  if ((temperature > 50 || oilStatus == 0) && !alarmActive) {
+    digitalWrite(buzzerPin, HIGH);
+    alarmActive = true;
+  } else if (temperature <= 50 && oilStatus == 1 && alarmActive) {
+    digitalWrite(buzzerPin, LOW);
+    alarmActive = false;
+  }
+}
+
+// ===== Send to Google Sheets every hour =====
+void sendToGoogleSheetHourly() {
+  int analogValue = analogRead(tempPin);
+  float voltage = analogValue * (3.3 / 4095.0);
+  float temperature = voltage * 100.0;
+  int oilStatus = digitalRead(floatSensorPin);
+
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(googleScriptUrl);
+    http.addHeader("Content-Type", "application/json");
+
+    StaticJsonDocument<200> doc;
+    doc["temperature"] = temperature;
+    doc["oil"] = oilStatus;
+
+    String payload;
+    serializeJson(doc, payload);
+
+    int httpResponseCode = http.POST(payload);
+    Serial.print("Google Sheets Response: ");
+    Serial.println(httpResponseCode);
+
+    http.end();
+  } else {
+    Serial.println("WiFi not connected. Can't log to Google Sheets.");
+  }
+}
+
+// ===== Main Loop =====
+void loop() {
+  Blynk.run();
+  timer.run();
+}
